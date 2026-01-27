@@ -1,0 +1,65 @@
+# HL7 Community Digest - Source Configuration
+# This file defines the Confluence pages and Zulip channels to monitor
+
+confluence:
+  # Da Vinci Work Group - Burden Reduction
+  - name: "Burden Reduction Wednesday"
+    work_group: "Da Vinci"
+    url: "https://confluence.hl7.org/spaces/DVP/pages/161080158/Burden+Reduction+Wednesday+Meeting+Minutes+Link"
+    description: "Wednesday meeting minutes for Da Vinci Burden Reduction work"
+    
+  - name: "Burden Reduction Thursday"
+    work_group: "Da Vinci"
+    url: "https://confluence.hl7.org/spaces/DVP/pages/161080164/Burden+Reduction+Thursday+Meeting+Minutes+Link"
+    description: "Thursday meeting minutes for Da Vinci Burden Reduction work"
+    
+  - name: "Burden Reduction Friday"
+    work_group: "Da Vinci"
+    url: "https://confluence.hl7.org/spaces/DVP/pages/161080161/Burden+Reduction+Friday+Meeting+Minutes+Link"
+    description: "Friday meeting minutes for Da Vinci Burden Reduction work"
+    
+  # CDS Work Group
+  - name: "Conference Calls/Meetings"
+    work_group: "CDS"
+    url: "https://confluence.hl7.org/spaces/CDS/pages/40742695/Conference+Calls+Meetings"
+    description: "CDS Hooks conference call and meeting notes"
+    
+  # Argonaut Project
+  - name: "2025 Projects"
+    work_group: "Argonaut"
+    url: "https://confluence.hl7.org/spaces/AP/pages/325451819/2025+Projects"
+    description: "Argonaut 2025 project plans and updates"
+
+zulip:
+  # Da Vinci Work Group Channels
+  - name: "Da Vinci CRD"
+    work_group: "Da Vinci"
+    channel_id: 180803
+    url: "https://chat.fhir.org/#narrow/channel/180803-Da-Vinci-CRD"
+    description: "Coverage Requirements Discovery discussions"
+    
+  - name: "Da Vinci DTR"
+    work_group: "Da Vinci"
+    channel_id: 197320
+    url: "https://chat.fhir.org/#narrow/channel/197320-Da-Vinci-DTR"
+    description: "Documentation Templates and Rules discussions"
+    
+  - name: "Da Vinci PAS"
+    work_group: "Da Vinci"
+    channel_id: 208874
+    url: "https://chat.fhir.org/#narrow/channel/208874-Da-Vinci-PAS"
+    description: "Prior Authorization Support discussions"
+    
+  # CDS Hooks Channel
+  - name: "CDS Hooks"
+    work_group: "CDS"
+    channel_id: 179159
+    url: "https://chat.fhir.org/#narrow/channel/179159-cds-hooks"
+    description: "CDS Hooks implementation discussions"
+    
+  # Argonaut Channel
+  - name: "Argonaut"
+    work_group: "Argonaut"
+    channel_id: 179175
+    url: "https://chat.fhir.org/#narrow/channel/179175-argonaut"
+    description: "Argonaut project discussions"

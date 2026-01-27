@@ -1,0 +1,94 @@
+# HL7 Community Digest - Git Ignore
+
+# ===========================================
+# Python
+# ===========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ===========================================
+# Virtual Environments
+# ===========================================
+venv/
+ENV/
+env/
+.venv/
+
+# ===========================================
+# IDE
+# ===========================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===========================================
+# Environment & Secrets
+# ===========================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+
+# ===========================================
+# AWS
+# ===========================================
+.aws-sam/
+samconfig.toml
+cdk.out/
+
+# ===========================================
+# Testing
+# ===========================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ===========================================
+# Type Checking
+# ===========================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ===========================================
+# Documentation
+# ===========================================
+site/
+
+# ===========================================
+# Project Specific
+# ===========================================
+# Local test outputs
+output/
+*.log
+scraped_data/
+digest_archive/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
