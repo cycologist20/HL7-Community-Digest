@@ -94,6 +94,7 @@ class DigestOrchestrator:
         digest: Digest,
         recipients: Optional[list[str]] = None,
         dry_run: Optional[bool] = None,
+        use_html: bool = True,
     ) -> dict:
         """Send digest email.
         
@@ -101,6 +102,7 @@ class DigestOrchestrator:
             digest: The digest to send.
             recipients: Override recipients list.
             dry_run: Override dry_run setting.
+            use_html: Whether to send HTML email (default True).
             
         Returns:
             Dict with delivery result.
@@ -109,11 +111,17 @@ class DigestOrchestrator:
             dry_run = self.config.dry_run
         
         subject = self.formatter.format_subject(digest)
-        body = self.formatter.format_plain_text(digest)
+        body_text = self.formatter.format_plain_text(digest)
+        
+        # Generate HTML version if requested
+        body_html = None
+        if use_html:
+            body_html = self.formatter.format_html(digest)
         
         return self.email_sender.send_digest(
             subject=subject,
-            body_text=body,
+            body_text=body_text,
+            body_html=body_html,
             recipients=recipients,
             dry_run=dry_run,
         )
@@ -122,12 +130,14 @@ class DigestOrchestrator:
         self,
         dry_run: Optional[bool] = None,
         recipients: Optional[list[str]] = None,
+        use_html: bool = True,
     ) -> dict:
         """Run the complete digest generation and delivery pipeline.
         
         Args:
             dry_run: If True, generate but don't send email.
             recipients: Override recipients list.
+            use_html: Whether to send HTML email (default True).
             
         Returns:
             Dict with results including 'digest', 'delivery', and 'stats'.
@@ -149,6 +159,7 @@ class DigestOrchestrator:
             digest=digest,
             recipients=recipients,
             dry_run=dry_run,
+            use_html=use_html,
         )
         
         # Calculate stats
@@ -177,15 +188,17 @@ class DigestOrchestrator:
 def run_daily_digest(
     dry_run: bool = False,
     recipients: Optional[list[str]] = None,
+    use_html: bool = True,
 ) -> dict:
     """Convenience function to run daily digest.
     
     Args:
         dry_run: If True, generate but don't send email.
         recipients: Override recipients list.
+        use_html: Whether to send HTML email (default True).
         
     Returns:
         Dict with results.
     """
     orchestrator = DigestOrchestrator()
-    return orchestrator.run(dry_run=dry_run, recipients=recipients)
+    return orchestrator.run(dry_run=dry_run, recipients=recipients, use_html=use_html)

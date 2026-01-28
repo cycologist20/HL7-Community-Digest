@@ -1,60 +1,52 @@
-"""Confluence page scraper for HL7 meeting minutes."""
+"""Confluence page scraper for HL7 meeting minutes with AI summarization."""
 
 import logging
+import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urljoin
 
 import requests
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from ..config import ConfluenceSource
-from ..models import ConfluencePageContent, ScrapedContent
+from ..models import ConfluencePageContent
 
 logger = logging.getLogger(__name__)
 
 
 class ScraperError(Exception):
     """Exception raised when scraping fails."""
-    
     pass
 
 
 class ConfluenceScraper:
     """Scrapes HL7 Confluence pages for meeting minutes and updates."""
     
-    # Use a real browser User-Agent to avoid being blocked
     USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
     
+    BASE_URL = "https://confluence.hl7.org"
+    LOOKBACK_DAYS = 7
+    
     def __init__(self, timeout: int = 60) -> None:
-        """Initialize the scraper.
-        
-        Args:
-            timeout: Request timeout in seconds.
-        """
         self.timeout = timeout
         self.session = requests.Session()
-        
-        # Set headers to mimic a real browser
         self.session.headers.update({
             "User-Agent": self.USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
         })
+        
+        # Check for Anthropic API key
+        self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+        self.use_ai_summary = bool(self.anthropic_api_key)
+        if self.use_ai_summary:
+            logger.info("AI summarization enabled")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -62,329 +54,253 @@ class ConfluenceScraper:
         reraise=True
     )
     def _fetch_page(self, url: str) -> str:
-        """Fetch a page with retry logic.
-        
-        Args:
-            url: The URL to fetch.
-            
-        Returns:
-            HTML content of the page.
-            
-        Raises:
-            ScraperError: If the page cannot be fetched after retries.
-        """
+        """Fetch a page with retry logic."""
         try:
-            logger.debug(f"Fetching URL: {url}")
             response = self.session.get(url, timeout=self.timeout)
-            
-            logger.debug(f"Response status: {response.status_code}")
-            
-            if response.status_code == 405:
-                # Method not allowed - try with different approach
-                logger.warning(f"Got 405 for {url}, trying without some headers...")
-                # Create a fresh session with minimal headers
-                simple_session = requests.Session()
-                simple_session.headers.update({
-                    "User-Agent": self.USER_AGENT,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                })
-                response = simple_session.get(url, timeout=self.timeout)
-                logger.debug(f"Retry response status: {response.status_code}")
-            
             response.raise_for_status()
             return response.text
-            
         except requests.RequestException as e:
             logger.error(f"Failed to fetch {url}: {e}")
             raise ScraperError(f"Failed to fetch page: {e}") from e
     
-    def _parse_confluence_page(self, html: str, url: str) -> tuple[str, str, Optional[datetime]]:
-        """Parse Confluence page HTML to extract content.
+    def _is_index_page(self, html: str) -> bool:
+        """Detect if a page is an index page listing multiple meetings."""
+        soup = BeautifulSoup(html, "lxml")
+        main_content = soup.select_one("#main-content") or soup.find("body")
+        if not main_content:
+            return False
         
-        Args:
-            html: Raw HTML content.
-            url: Source URL (for logging).
+        # Count links that look like meeting dates
+        date_link_pattern = re.compile(r'\d{4}-\d{2}-\d{2}')
+        meeting_links = [a for a in main_content.find_all('a', href=True) 
+                        if date_link_pattern.search(a.get_text())]
+        
+        return len(meeting_links) >= 2
+    
+    def _extract_meeting_links(self, html: str) -> list[dict]:
+        """Extract links to individual meeting pages from an index page."""
+        soup = BeautifulSoup(html, "lxml")
+        main_content = soup.select_one("#main-content") or soup.find("body")
+        if not main_content:
+            return []
+        
+        meeting_links = []
+        date_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})')
+        cutoff = datetime.now() - timedelta(days=self.LOOKBACK_DAYS)
+        
+        for link in main_content.find_all('a', href=True):
+            link_text = link.get_text(strip=True)
+            href = link['href']
             
-        Returns:
-            Tuple of (title, content, last_modified).
-        """
+            date_match = date_pattern.search(link_text)
+            if date_match:
+                date_str = date_match.group(1)
+                try:
+                    meeting_date = datetime.strptime(date_str, '%Y-%m-%d')
+                    if meeting_date >= cutoff:
+                        # Resolve relative URL
+                        if href.startswith('/'):
+                            full_url = self.BASE_URL + href
+                        else:
+                            full_url = href
+                        
+                        meeting_links.append({
+                            'url': full_url,
+                            'date': meeting_date,
+                            'title': link_text,
+                        })
+                except ValueError:
+                    continue
+        
+        # Sort by date, most recent first, limit to 3
+        meeting_links.sort(key=lambda x: x['date'], reverse=True)
+        return meeting_links[:3]
+    
+    def _extract_meeting_text(self, html: str) -> str:
+        """Extract clean text from a meeting notes page."""
         soup = BeautifulSoup(html, "lxml")
         
-        # Extract page title
-        title_elem = soup.find("title")
-        title = title_elem.get_text(strip=True) if title_elem else "Untitled Page"
-        
-        # Remove " - ... - Confluence" suffix if present
-        title = re.sub(r"\s*-\s*.*\s*-\s*Confluence\s*$", "", title)
-        
-        # Find the main content area
-        # Confluence uses different content containers depending on the view
-        content_selectors = [
-            "#main-content",
-            ".wiki-content", 
-            "#content .page-content",
-            ".confluence-content",
-            "#main",
-            "article",
-            ".content-body",
-        ]
-        
-        content_elem = None
-        for selector in content_selectors:
-            content_elem = soup.select_one(selector)
-            if content_elem:
-                logger.debug(f"Found content using selector: {selector}")
-                break
-        
-        if not content_elem:
-            # Fallback to body if no content container found
-            logger.debug("Using body as fallback content container")
-            content_elem = soup.find("body")
-        
-        # Extract text content, preserving some structure
-        content = self._extract_text_content(content_elem) if content_elem else ""
-        
-        # Try to find last modified date
-        last_modified = self._extract_last_modified(soup)
-        
-        return title, content, last_modified
-    
-    def _extract_text_content(self, element: Tag) -> str:
-        """Extract readable text from an HTML element.
-        
-        Preserves paragraph structure while removing navigation and metadata.
-        
-        Args:
-            element: BeautifulSoup Tag to extract from.
-            
-        Returns:
-            Cleaned text content.
-        """
-        # Make a copy to avoid modifying the original
-        element = BeautifulSoup(str(element), "lxml")
-        
         # Remove unwanted elements
-        for tag in element.find_all(["script", "style", "nav", "header", "footer", "noscript"]):
+        for tag in soup.find_all(['script', 'style', 'nav', 'header', 'footer']):
             tag.decompose()
         
-        # Also remove Confluence-specific navigation and metadata
-        unwanted_classes = [
-            "page-metadata", "breadcrumb", "page-sidebar", "navigation",
-            "aui-nav", "space-shortcuts", "page-tree", "footer",
-            "confluence-information-macro", "expand-container"
-        ]
-        for class_name in unwanted_classes:
-            for tag in element.find_all(class_=re.compile(class_name, re.I)):
-                tag.decompose()
+        main_content = soup.select_one("#main-content") or soup.find("body")
+        if not main_content:
+            return ""
         
-        # Remove elements by ID
-        unwanted_ids = ["footer", "header", "navigation", "sidebar"]
-        for elem_id in unwanted_ids:
-            tag = element.find(id=re.compile(elem_id, re.I))
-            if tag:
-                tag.decompose()
+        # Get text with some structure
+        text = main_content.get_text(separator='\n', strip=True)
         
-        # Get text with some structure preservation
-        lines = []
+        # Clean up excessive whitespace
+        text = re.sub(r'\n{3,}', '\n\n', text)
         
-        for elem in element.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "div"]):
-            text = elem.get_text(strip=True)
-            if text and len(text) > 2:  # Skip very short strings
-                # Add header markers
-                if elem.name in ["h1", "h2", "h3", "h4", "h5", "h6"]:
-                    lines.append(f"\n## {text}\n")
-                elif elem.name == "li":
-                    lines.append(f"• {text}")
-                elif elem.name in ["td", "th"]:
-                    # Skip table cells as they often duplicate content
-                    continue
-                else:
-                    # Only add if not a duplicate of the last line
-                    if not lines or text != lines[-1].strip("• \n#"):
-                        lines.append(text)
-        
-        # Join and clean up whitespace
-        content = "\n".join(lines)
-        content = re.sub(r"\n{3,}", "\n\n", content)
-        
-        return content.strip()
+        return text[:15000]  # Limit to ~15k chars for API
     
-    def _extract_last_modified(self, soup: BeautifulSoup) -> Optional[datetime]:
-        """Extract last modified date from Confluence page.
-        
-        Args:
-            soup: Parsed HTML.
-            
-        Returns:
-            Last modified datetime if found, None otherwise.
-        """
-        # Confluence often has this in a meta tag or in page metadata
-        meta_selectors = [
-            'meta[name="ajs-last-modified-date"]',
-            'meta[name="last-modified"]',
-        ]
-        
-        for selector in meta_selectors:
-            meta = soup.select_one(selector)
-            if meta and meta.get("content"):
-                try:
-                    # Try parsing ISO format
-                    return datetime.fromisoformat(meta["content"].replace("Z", "+00:00"))
-                except ValueError:
-                    pass
-        
-        # Look for "last updated on" text in the page
-        update_patterns = [
-            r"last updated on\s+(\w+\s+\d+,?\s+\d{4})",
-            r"last modified[:\s]+(\w+\s+\d+,?\s+\d{4})",
-            r"Updated:\s*(\w+\s+\d+,?\s+\d{4})",
-        ]
-        
-        text = soup.get_text()
-        for pattern in update_patterns:
-            match = re.search(pattern, text, re.I)
-            if match:
-                try:
-                    from dateutil import parser as date_parser
-                    return date_parser.parse(match.group(1))
-                except (ValueError, ImportError):
-                    pass
-        
-        return None
-    
-    def _extract_meeting_info(self, content: str) -> dict:
-        """Extract structured meeting information from content.
-        
-        Args:
-            content: Page content text.
-            
-        Returns:
-            Dict with meeting_date, attendees, action_items, decisions.
-        """
-        result = {
-            "meeting_date": None,
-            "attendees": [],
-            "action_items": [],
-            "decisions": [],
-        }
-        
-        # Extract date patterns (e.g., "January 15, 2025" or "2025-01-15")
-        date_patterns = [
-            r"(\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b)",
-            r"(\b\d{4}-\d{2}-\d{2}\b)",
-        ]
-        
-        for pattern in date_patterns:
-            match = re.search(pattern, content)
-            if match:
-                try:
-                    from dateutil import parser as date_parser
-                    result["meeting_date"] = date_parser.parse(match.group(1))
-                    break
-                except (ValueError, ImportError):
-                    pass
-        
-        # Extract action items (common patterns in meeting notes)
-        action_patterns = [
-            r"(?:Action|TODO|Action Item)[:\s]+(.+?)(?:\n|$)",
-            r"•\s*(?:Action)[:\s]*(.+?)(?:\n|$)",
-        ]
-        
-        for pattern in action_patterns:
-            matches = re.findall(pattern, content, re.I)
-            result["action_items"].extend([m.strip() for m in matches if m.strip()])
-        
-        # Extract decisions
-        decision_patterns = [
-            r"(?:Decision|Decided|Agreed)[:\s]+(.+?)(?:\n|$)",
-            r"(?:DECISION)[:\s]*(.+?)(?:\n|$)",
-        ]
-        
-        for pattern in decision_patterns:
-            matches = re.findall(pattern, content, re.I)
-            result["decisions"].extend([m.strip() for m in matches if m.strip()])
-        
-        return result
-    
-    def scrape_page(
-        self, 
-        url: str, 
-        work_group: str,
-        source_name: Optional[str] = None
-    ) -> Optional[ConfluencePageContent]:
-        """Scrape a single Confluence page.
-        
-        Args:
-            url: The Confluence page URL.
-            work_group: The HL7 work group name (e.g., "Da Vinci").
-            source_name: Optional friendly name for the source.
-            
-        Returns:
-            ConfluencePageContent if successful, None if failed.
-        """
-        logger.info(f"Scraping {work_group} page: {url}")
+    def _summarize_with_claude(self, meeting_text: str, meeting_title: str) -> str:
+        """Use Claude API to summarize meeting content."""
+        if not self.anthropic_api_key:
+            return self._fallback_summary(meeting_text)
         
         try:
-            html = self._fetch_page(url)
-            title, content, last_modified = self._parse_confluence_page(html, url)
+            import anthropic
+            client = anthropic.Anthropic(api_key=self.anthropic_api_key)
             
-            # Extract meeting-specific information
-            meeting_info = self._extract_meeting_info(content)
+            prompt = f"""Summarize this HL7 FHIR meeting notes in 2-3 concise sentences for a daily digest email. Focus on:
+- Key decisions made (especially JIRA tickets marked "ready for vote")
+- Important announcements
+- Major discussion topics
+
+Meeting: {meeting_title}
+
+Content:
+{meeting_text[:10000]}
+
+Provide a brief, informative summary (max 150 words). Start directly with the content, no preamble."""
+
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            summary = response.content[0].text.strip()
+            logger.debug(f"AI summary generated: {summary[:100]}...")
+            return summary
+            
+        except Exception as e:
+            logger.warning(f"AI summarization failed: {e}, using fallback")
+            return self._fallback_summary(meeting_text)
+    
+    def _fallback_summary(self, text: str) -> str:
+        """Create a basic summary without AI."""
+        # Count JIRA tickets
+        jira_tickets = re.findall(r'FHIR-\d+', text)
+        unique_tickets = list(set(jira_tickets))
+        
+        # Count votes
+        vote_count = len(re.findall(r'marked ready for vote', text, re.I))
+        
+        # Count attendees
+        attendee_match = re.search(r'Attendees via Zoom[^\n]*\n([\s\S]*?)(?=\n\n|\Z)', text)
+        attendee_count = 0
+        if attendee_match:
+            attendee_count = len([l for l in attendee_match.group(1).split('\n') if l.strip()])
+        
+        parts = []
+        if attendee_count > 0:
+            parts.append(f"{attendee_count} attendees")
+        if unique_tickets:
+            parts.append(f"Discussed {len(unique_tickets)} JIRA tickets ({', '.join(unique_tickets[:3])})")
+        if vote_count > 0:
+            parts.append(f"{vote_count} ticket(s) marked ready for vote")
+        
+        if parts:
+            return " | ".join(parts)
+        return "Meeting notes available - click to view details."
+    
+    def scrape_source(self, source: ConfluenceSource) -> Optional[ConfluencePageContent]:
+        """Scrape a configured Confluence source, following links if index page."""
+        logger.info(f"Scraping {source.work_group} page: {source.url}")
+        
+        try:
+            html = self._fetch_page(source.url)
+            
+            # Check if this is an index page
+            if self._is_index_page(html):
+                logger.info(f"Detected index page, looking for meeting links...")
+                meeting_links = self._extract_meeting_links(html)
+                
+                if meeting_links:
+                    logger.info(f"Found {len(meeting_links)} recent meeting(s), fetching content...")
+                    
+                    meeting_summaries = []
+                    most_recent_date = None
+                    all_decisions = []
+                    
+                    for meeting in meeting_links:
+                        try:
+                            meeting_html = self._fetch_page(meeting['url'])
+                            meeting_text = self._extract_meeting_text(meeting_html)
+                            
+                            # Get summary (AI or fallback)
+                            summary = self._summarize_with_claude(meeting_text, meeting['title'])
+                            
+                            date_str = meeting['date'].strftime('%b %d')
+                            meeting_summaries.append(f"**{date_str}**: {summary}")
+                            
+                            if most_recent_date is None or meeting['date'] > most_recent_date:
+                                most_recent_date = meeting['date']
+                            
+                            # Extract decisions for metadata
+                            vote_count = len(re.findall(r'marked ready for vote', meeting_text, re.I))
+                            if vote_count > 0:
+                                all_decisions.append(f"{vote_count} tickets ready for vote")
+                                
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch meeting {meeting['url']}: {e}")
+                            continue
+                    
+                    if meeting_summaries:
+                        combined_content = "\n\n".join(meeting_summaries)
+                        
+                        return ConfluencePageContent(
+                            source_name=source.name,
+                            work_group=source.work_group,
+                            url=source.url,
+                            title=f"{source.name}",
+                            content=combined_content,
+                            last_modified=most_recent_date,
+                            scrape_timestamp=datetime.utcnow(),
+                            meeting_date=most_recent_date,
+                            attendees=[],
+                            action_items=[],
+                            decisions=all_decisions,
+                        )
+            
+            # Not an index page - extract content directly
+            soup = BeautifulSoup(html, "lxml")
+            title_elem = soup.find("title")
+            title = title_elem.get_text(strip=True) if title_elem else source.name
+            title = re.sub(r"\s*-\s*.*\s*-\s*Confluence\s*$", "", title)
+            
+            main_content = soup.select_one("#main-content") or soup.find("body")
+            content = main_content.get_text(separator=' ', strip=True)[:500] if main_content else ""
+            
+            # Try to find last modified
+            last_modified = None
+            mod_match = re.search(r'last updated[^\n]*on\s+(\w+\s+\d+,?\s+\d{4})', html, re.I)
+            if mod_match:
+                try:
+                    from dateutil import parser as date_parser
+                    last_modified = date_parser.parse(mod_match.group(1))
+                except:
+                    pass
             
             return ConfluencePageContent(
-                source_name=source_name or title,
-                work_group=work_group,
-                url=url,
+                source_name=source.name,
+                work_group=source.work_group,
+                url=source.url,
                 title=title,
                 content=content,
                 last_modified=last_modified,
                 scrape_timestamp=datetime.utcnow(),
-                meeting_date=meeting_info["meeting_date"],
-                attendees=meeting_info["attendees"],
-                action_items=meeting_info["action_items"],
-                decisions=meeting_info["decisions"],
+                meeting_date=None,
+                attendees=[],
+                action_items=[],
+                decisions=[],
             )
             
-        except ScraperError as e:
-            logger.error(f"Failed to scrape {url}: {e}")
-            return None
         except Exception as e:
-            logger.exception(f"Unexpected error scraping {url}: {e}")
+            logger.error(f"Failed to scrape {source.url}: {e}")
             return None
-    
-    def scrape_source(self, source: ConfluenceSource) -> Optional[ConfluencePageContent]:
-        """Scrape a configured Confluence source.
-        
-        Args:
-            source: ConfluenceSource configuration.
-            
-        Returns:
-            ConfluencePageContent if successful, None if failed.
-        """
-        return self.scrape_page(
-            url=source.url,
-            work_group=source.work_group,
-            source_name=source.name,
-        )
     
     def scrape_all(self, sources: list[ConfluenceSource]) -> list[ConfluencePageContent]:
-        """Scrape all configured Confluence sources.
-        
-        Args:
-            sources: List of ConfluenceSource configurations.
-            
-        Returns:
-            List of successfully scraped content.
-        """
+        """Scrape all configured Confluence sources."""
         results = []
-        
         for source in sources:
             content = self.scrape_source(source)
             if content:
                 results.append(content)
-            else:
-                logger.warning(f"Failed to scrape source: {source.name}")
         
         logger.info(f"Successfully scraped {len(results)}/{len(sources)} Confluence pages")
         return results

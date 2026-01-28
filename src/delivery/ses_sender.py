@@ -37,6 +37,7 @@ class SESSender:
         self,
         subject: str,
         body_text: str,
+        body_html: Optional[str] = None,
         recipients: Optional[list[str]] = None,
         dry_run: bool = False,
     ) -> dict:
@@ -44,7 +45,8 @@ class SESSender:
         
         Args:
             subject: Email subject line.
-            body_text: Plain text email body.
+            body_text: Plain text email body (required for fallback).
+            body_html: HTML email body (optional, preferred if provided).
             recipients: List of recipient emails. Uses config if not provided.
             dry_run: If True, log but don't actually send.
             
@@ -67,7 +69,9 @@ class SESSender:
             logger.info(f"  From: {self.config.sender_email}")
             logger.info(f"  To: {', '.join(recipients)}")
             logger.info(f"  Subject: {subject}")
-            logger.info(f"  Body length: {len(body_text)} chars")
+            logger.info(f"  Body length: {len(body_text)} chars (text)")
+            if body_html:
+                logger.info(f"  Body length: {len(body_html)} chars (html)")
             return {
                 "success": True,
                 "message_id": "dry-run",
@@ -75,6 +79,21 @@ class SESSender:
             }
         
         try:
+            # Build the email body
+            body = {
+                "Text": {
+                    "Data": body_text,
+                    "Charset": "UTF-8",
+                },
+            }
+            
+            # Add HTML body if provided
+            if body_html:
+                body["Html"] = {
+                    "Data": body_html,
+                    "Charset": "UTF-8",
+                }
+            
             response = self.client.send_email(
                 Source=self.config.sender_email,
                 Destination={
@@ -85,12 +104,7 @@ class SESSender:
                         "Data": subject,
                         "Charset": "UTF-8",
                     },
-                    "Body": {
-                        "Text": {
-                            "Data": body_text,
-                            "Charset": "UTF-8",
-                        },
-                    },
+                    "Body": body,
                 },
             )
             

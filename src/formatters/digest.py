@@ -1,7 +1,8 @@
 """Digest formatter for HL7 Community Digest."""
 
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pytz
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 class DigestFormatter:
     """Formats scraped content into a digest for delivery."""
     
+    # Number of days to consider content "recent"
+    RECENT_DAYS = 7
+    
     def __init__(self, config: Optional[ProcessingConfig] = None) -> None:
         """Initialize the formatter.
         
@@ -34,55 +38,198 @@ class DigestFormatter:
         self.config = config
         self.timezone = pytz.timezone(config.timezone)
     
+    def _is_ai_summary(self, content: str) -> bool:
+        """Check if content appears to be an AI-generated summary.
+        
+        AI summaries typically start with **Date**: or contain multiple
+        meeting summaries separated by newlines.
+        
+        Args:
+            content: The content to check.
+            
+        Returns:
+            True if this looks like an AI summary.
+        """
+        if not content:
+            return False
+        
+        # AI summaries start with **Mon DD**: pattern
+        if re.match(r'\*\*[A-Z][a-z]{2}\s+\d{1,2}\*\*:', content):
+            return True
+        
+        # Or contain multiple such patterns (multi-meeting summaries)
+        if len(re.findall(r'\*\*[A-Z][a-z]{2}\s+\d{1,2}\*\*:', content)) >= 1:
+            return True
+        
+        return False
+    
+    def _clean_content(self, content: str) -> str:
+        """Clean up scraped content for better readability.
+        
+        Args:
+            content: Raw scraped content.
+            
+        Returns:
+            Cleaned content string.
+        """
+        if not content:
+            return ""
+        
+        # Don't clean AI-generated summaries - they're already formatted
+        if self._is_ai_summary(content):
+            return content
+        
+        # Pattern to detect concatenated meeting titles (dates followed by text without spaces)
+        date_pattern = r'\d{4}-\d{2}-\d{2}'
+        date_matches = re.findall(date_pattern, content[:500])
+        
+        if len(date_matches) >= 3:
+            # This looks like an index page with many meeting links
+            return self._summarize_index_page(content)
+        
+        # Clean up common noise patterns
+        cleaned = content
+        
+        # Remove "Create Agenda" and similar task management noise
+        cleaned = re.sub(r'Create Agenda\s*Tasks\s*Description\s*Due date\s*Assignee\s*Task appears on', '', cleaned)
+        
+        # Remove repeated date patterns that look like task lists
+        cleaned = re.sub(r'(\d{1,2}\s+\w{3}\s+\d{4}[^.]*){3,}', '[Task list removed]', cleaned)
+        
+        # Normalize whitespace
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        
+        # Truncate if still too long (only for non-AI content)
+        if len(cleaned) > 500:
+            # Try to find a sentence boundary
+            sentence_end = cleaned[:500].rfind('. ')
+            if sentence_end > 100:
+                cleaned = cleaned[:sentence_end + 1]
+            else:
+                cleaned = cleaned[:500] + "..."
+        
+        return cleaned
+    
+    def _summarize_index_page(self, content: str) -> str:
+        """Summarize an index page that lists multiple meetings."""
+        date_pattern = r'(\d{4}-\d{2}-\d{2})'
+        dates = re.findall(date_pattern, content)
+        
+        if dates:
+            unique_dates = sorted(set(dates), reverse=True)
+            recent_dates = unique_dates[:3]
+            formatted_dates = []
+            for d in recent_dates:
+                try:
+                    dt = datetime.strptime(d, '%Y-%m-%d')
+                    formatted_dates.append(dt.strftime('%b %d'))
+                except ValueError:
+                    formatted_dates.append(d)
+            
+            if len(unique_dates) > 3:
+                return f"Meeting index with links to {len(unique_dates)} sessions. Most recent: {', '.join(formatted_dates)}. Click to view individual meeting notes."
+            else:
+                return f"Meeting index with links for: {', '.join(formatted_dates)}. Click to view individual meeting notes."
+        
+        return "Index page containing links to meeting minutes. Click to view details."
+    
+    def _extract_most_recent_date_from_content(self, content: str) -> Optional[datetime]:
+        """Try to extract the most recent date mentioned in the content."""
+        date_pattern = r'(\d{4}-\d{2}-\d{2})'
+        dates = re.findall(date_pattern, content)
+        
+        if dates:
+            try:
+                parsed_dates = []
+                for d in dates:
+                    try:
+                        parsed_dates.append(datetime.strptime(d, '%Y-%m-%d'))
+                    except ValueError:
+                        continue
+                
+                if parsed_dates:
+                    return max(parsed_dates)
+            except Exception:
+                pass
+        
+        return None
+    
+    def _is_recent(self, date: Optional[datetime], reference_date: Optional[datetime] = None) -> bool:
+        """Check if a date is within the recent window."""
+        if date is None:
+            return False
+        
+        if reference_date is None:
+            reference_date = datetime.now(self.timezone)
+        
+        if date.tzinfo is None:
+            date = self.timezone.localize(date)
+        
+        if reference_date.tzinfo is None:
+            reference_date = self.timezone.localize(reference_date)
+        
+        cutoff = reference_date - timedelta(days=self.RECENT_DAYS)
+        return date >= cutoff
+    
+    def _get_freshness_label(self, date: Optional[datetime]) -> str:
+        """Get a human-readable freshness label for a date."""
+        if date is None:
+            return ""
+        
+        now = datetime.now(self.timezone)
+        
+        if date.tzinfo is None:
+            date = self.timezone.localize(date)
+        
+        delta = now - date
+        
+        if delta.days == 0:
+            return "🟢 Updated today"
+        elif delta.days == 1:
+            return "🟢 Updated yesterday"
+        elif delta.days <= 7:
+            return f"🟢 Updated {delta.days} days ago"
+        elif delta.days <= 30:
+            return f"🟡 Updated {delta.days} days ago"
+        else:
+            return f"⚪ Last updated {date.strftime('%B %d, %Y')}"
+    
     def _summarize_confluence_content(
         self, 
         content: ConfluencePageContent
     ) -> ContentSummary:
-        """Create a summary from Confluence page content.
+        """Create a summary from Confluence page content."""
+        # Clean up the content (preserves AI summaries)
+        cleaned_content = self._clean_content(content.content)
         
-        For POC, this creates a simple summary without AI.
-        Phase 2 will add Claude-powered summarization.
+        # Determine the effective date
+        effective_date = content.last_modified
+        if effective_date is None:
+            effective_date = self._extract_most_recent_date_from_content(content.content)
         
-        Args:
-            content: Scraped Confluence page content.
-            
-        Returns:
-            ContentSummary for the digest.
-        """
-        # For POC: Create a simple summary from the content
-        # Extract first ~200 chars as preview, or use title if content is short
-        preview = content.content[:500].strip() if content.content else ""
-        
-        # Try to get a meaningful first sentence or paragraph
-        first_para_end = preview.find("\n\n")
-        if first_para_end > 50:
-            preview = preview[:first_para_end]
-        elif len(preview) > 200:
-            # Find a sentence boundary
-            sentence_end = preview[:200].rfind(". ")
-            if sentence_end > 50:
-                preview = preview[:sentence_end + 1]
-            else:
-                preview = preview[:200] + "..."
+        is_recent = self._is_recent(effective_date)
         
         # Build summary text
         summary_parts = []
         
-        if content.meeting_date:
-            date_str = content.meeting_date.strftime("%B %d")
-            summary_parts.append(f"Meeting from {date_str}.")
+        # Add freshness indicator if we have a date
+        if effective_date:
+            freshness = self._get_freshness_label(effective_date)
+            if freshness:
+                summary_parts.append(freshness)
         
-        if preview:
-            summary_parts.append(preview)
+        # Add the cleaned content
+        if cleaned_content:
+            summary_parts.append(cleaned_content)
         else:
-            summary_parts.append(f"Page updated: {content.title}")
+            summary_parts.append("No content preview available.")
         
-        # Add action items or decisions if found
-        if content.action_items:
-            summary_parts.append(f"Action items: {len(content.action_items)} identified.")
+        # Add action items / decisions if found (and not already in AI summary)
+        if content.decisions and not self._is_ai_summary(content.content):
+            summary_parts.append(f"✅ {len(content.decisions)} decision(s) recorded.")
         
-        if content.decisions:
-            summary_parts.append(f"Decisions: {len(content.decisions)} recorded.")
+        # Mark as trending if has decisions
+        is_trending = is_recent and bool(content.decisions)
         
         summary = " ".join(summary_parts)
         
@@ -92,27 +239,16 @@ class DigestFormatter:
             work_group=content.work_group,
             url=content.url,
             summary=summary,
-            is_trending=False,
-            has_updates=bool(content.content),
-            last_activity=content.last_modified,
+            is_trending=is_trending,
+            has_updates=is_recent,
+            last_activity=effective_date,
         )
     
     def _summarize_zulip_content(
         self, 
         content: ZulipThreadContent
     ) -> ContentSummary:
-        """Create a summary from Zulip thread content.
-        
-        For POC, this creates a simple summary without AI.
-        Phase 2 will add Claude-powered summarization.
-        
-        Args:
-            content: Scraped Zulip thread content.
-            
-        Returns:
-            ContentSummary for the digest.
-        """
-        # Build summary with activity metrics
+        """Create a summary from Zulip thread content."""
         summary_parts = []
         
         if content.message_count > 0:
@@ -123,7 +259,6 @@ class DigestFormatter:
         else:
             summary_parts.append("No significant activity in last 24 hours.")
         
-        # Preview first message if available
         if content.messages:
             first_msg = content.messages[0].content[:150]
             if len(content.messages[0].content) > 150:
@@ -150,16 +285,7 @@ class DigestFormatter:
         zulip_content: Optional[list[ZulipThreadContent]] = None,
         digest_date: Optional[datetime] = None,
     ) -> Digest:
-        """Create a complete digest from scraped content.
-        
-        Args:
-            confluence_content: List of scraped Confluence pages.
-            zulip_content: List of scraped Zulip threads (optional for POC).
-            digest_date: Date for the digest. Defaults to today.
-            
-        Returns:
-            Formatted Digest object.
-        """
+        """Create a complete digest from scraped content."""
         if digest_date is None:
             digest_date = datetime.now(self.timezone)
         
@@ -172,13 +298,15 @@ class DigestFormatter:
                 for content in confluence_content
             ]
             
+            # Sort: recent first, then by work group
+            confluence_summaries.sort(key=lambda x: (not x.has_updates, x.work_group))
+            
             sections.append(DigestSection(
                 title="Confluence Updates",
                 source_type=SourceType.CONFLUENCE,
                 summaries=confluence_summaries,
             ))
         else:
-            # Add empty section to show we checked
             sections.append(DigestSection(
                 title="Confluence Updates",
                 source_type=SourceType.CONFLUENCE,
@@ -192,7 +320,6 @@ class DigestFormatter:
                 for content in zulip_content
             ]
             
-            # Sort with trending first
             zulip_summaries.sort(key=lambda x: (not x.is_trending, not x.has_updates))
             
             sections.append(DigestSection(
@@ -208,24 +335,289 @@ class DigestFormatter:
         )
     
     def format_subject(self, digest: Digest) -> str:
-        """Generate email subject line for digest.
-        
-        Args:
-            digest: The digest to format.
-            
-        Returns:
-            Subject line string.
-        """
+        """Generate email subject line for digest."""
         date_str = digest.date.strftime("%A, %B %d, %Y")
-        return f"HL7 Community Digest - {date_str}"
+        
+        recent_count = sum(
+            1 for section in digest.sections 
+            for summary in section.summaries 
+            if summary.has_updates
+        )
+        
+        if recent_count > 0:
+            return f"HL7 Community Digest - {date_str} ({recent_count} recent updates)"
+        else:
+            return f"HL7 Community Digest - {date_str}"
     
     def format_plain_text(self, digest: Digest) -> str:
-        """Format digest as plain text email body.
-        
-        Args:
-            digest: The digest to format.
-            
-        Returns:
-            Plain text email body.
-        """
+        """Format digest as plain text email body."""
         return digest.to_plain_text()
+    
+    def format_html(self, digest: Digest) -> str:
+        """Format digest as HTML email body."""
+        date_str = digest.date.strftime("%A, %B %d, %Y")
+        
+        total_pages = sum(len(s.summaries) for s in digest.sections if s.source_type == SourceType.CONFLUENCE)
+        total_threads = sum(len(s.summaries) for s in digest.sections if s.source_type == SourceType.ZULIP)
+        recent_count = sum(
+            1 for section in digest.sections 
+            for summary in section.summaries 
+            if summary.has_updates
+        )
+        
+        if recent_count > 0:
+            stat_message = f"Found <strong>{recent_count} page(s) with recent activity</strong> (updated within {self.RECENT_DAYS} days) across {total_pages} monitored Confluence pages."
+        else:
+            stat_message = f"Monitored {total_pages} Confluence pages. No pages updated within the last {self.RECENT_DAYS} days."
+        
+        html_parts = [
+            self._get_html_header(),
+            f'''
+    <h1>HL7 Community Digest</h1>
+    <p style="color: #718096;">{date_str}</p>
+    
+    <div class="stat-box">
+        <strong>📊 Today's Scan</strong><br>
+        {stat_message}<br>
+        <em>Helping ASTP standards team stay current with Da Vinci, CDS Hooks, and Argonaut discussions.</em>
+    </div>
+'''
+        ]
+        
+        for section in digest.sections:
+            html_parts.append(self._format_section_html(section))
+        
+        html_parts.append(f'''
+    <div class="footer">
+        <p>Confluence pages scanned: {total_pages} | Zulip channels monitored: {total_threads}</p>
+        <p>Generated by HL7 Community Intelligence System</p>
+        <p style="font-size: 0.8em;">Questions or feedback? Contact: jim@mosaiclifetech.com</p>
+    </div>
+</body>
+</html>
+''')
+        
+        return "".join(html_parts)
+    
+    def _get_html_header(self) -> str:
+        """Get the HTML document header with styles."""
+        return '''<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            line-height: 1.6; 
+            color: #333; 
+            max-width: 800px; 
+            margin: 0 auto; 
+            padding: 20px; 
+        }
+        h1 { 
+            color: #1a365d; 
+            border-bottom: 3px solid #3182ce; 
+            padding-bottom: 10px; 
+        }
+        h2 { 
+            color: #2c5282; 
+            margin-top: 30px; 
+        }
+        h3 {
+            color: #2d3748;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+        .stat-box { 
+            background: #ebf8ff; 
+            border-left: 4px solid #3182ce; 
+            padding: 15px; 
+            margin: 20px 0; 
+        }
+        .article { 
+            background: #f7fafc; 
+            padding: 15px; 
+            margin: 15px 0; 
+            border-radius: 5px; 
+        }
+        .article-recent {
+            background: #f0fff4;
+            border-left: 4px solid #38a169;
+        }
+        .article-stale {
+            background: #f7fafc;
+            border-left: 4px solid #cbd5e0;
+        }
+        .article-trending { 
+            border-left: 4px solid #d69e2e !important;
+            background: #fffff0 !important;
+        }
+        .source { 
+            color: #718096; 
+            font-size: 0.9em; 
+        }
+        a { 
+            color: #3182ce; 
+        }
+        .footer { 
+            margin-top: 40px; 
+            padding-top: 20px; 
+            border-top: 1px solid #e2e8f0; 
+            color: #718096; 
+            font-size: 0.9em; 
+        }
+        .category { 
+            margin-bottom: 30px; 
+        }
+        .no-updates {
+            color: #718096;
+            font-style: italic;
+            padding: 10px;
+            background: #f7fafc;
+            border-radius: 5px;
+        }
+        .section-header {
+            display: flex;
+            align-items: center;
+            margin-top: 20px;
+            margin-bottom: 15px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .work-group-header {
+            color: #4a5568;
+            font-size: 1em;
+            margin-top: 15px;
+            margin-bottom: 10px;
+        }
+        .meeting-summary {
+            margin: 10px 0;
+            padding: 10px;
+            background: #fff;
+            border-radius: 4px;
+            border: 1px solid #e2e8f0;
+        }
+        .meeting-date {
+            font-weight: bold;
+            color: #2c5282;
+        }
+        .trending-badge {
+            display: inline-block;
+            background: #feebc8;
+            color: #c05621;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 0.8em;
+            font-weight: bold;
+            margin-left: 8px;
+        }
+    </style>
+</head>
+<body>
+'''
+    
+    def _format_section_html(self, section: DigestSection) -> str:
+        """Format a single section as HTML."""
+        if section.source_type == SourceType.CONFLUENCE:
+            icon = "📄"
+            section_title = "Confluence Updates"
+        else:
+            icon = "💬"
+            section_title = "Zulip Discussions"
+        
+        html_parts = [f'''
+    <div class="category">
+        <h2>{icon} {section_title}</h2>
+''']
+        
+        if not section.summaries:
+            html_parts.append('''
+        <p class="no-updates">No pages configured for this section.</p>
+''')
+        else:
+            recent_summaries = [s for s in section.summaries if s.has_updates]
+            stale_summaries = [s for s in section.summaries if not s.has_updates]
+            
+            if recent_summaries:
+                html_parts.append('''
+        <div class="section-header">
+            <h3 style="margin: 0; color: #276749;">🟢 Recent Activity (Last 7 Days)</h3>
+        </div>
+''')
+                work_groups: dict[str, list[ContentSummary]] = {}
+                for summary in recent_summaries:
+                    if summary.work_group not in work_groups:
+                        work_groups[summary.work_group] = []
+                    work_groups[summary.work_group].append(summary)
+                
+                for work_group, summaries in work_groups.items():
+                    html_parts.append(f'''
+        <p class="work-group-header"><strong>🏢 {work_group}</strong></p>
+''')
+                    for summary in summaries:
+                        html_parts.append(self._format_summary_html(summary, is_recent=True))
+            
+            if stale_summaries:
+                if recent_summaries:
+                    html_parts.append('''
+        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;">
+''')
+                
+                html_parts.append('''
+        <div class="section-header">
+            <h3 style="margin: 0; color: #718096;">⚪ Older Content</h3>
+        </div>
+        <p style="color: #718096; font-size: 0.9em; margin-bottom: 15px;">These pages have not been updated in the last 7 days:</p>
+''')
+                work_groups: dict[str, list[ContentSummary]] = {}
+                for summary in stale_summaries:
+                    if summary.work_group not in work_groups:
+                        work_groups[summary.work_group] = []
+                    work_groups[summary.work_group].append(summary)
+                
+                for work_group, summaries in work_groups.items():
+                    html_parts.append(f'''
+        <p class="work-group-header" style="color: #a0aec0;"><strong>🏢 {work_group}</strong></p>
+''')
+                    for summary in summaries:
+                        html_parts.append(self._format_summary_html(summary, is_recent=False))
+        
+        html_parts.append('''
+    </div>
+''')
+        
+        return "".join(html_parts)
+    
+    def _format_summary_html(self, summary: ContentSummary, is_recent: bool = True) -> str:
+        """Format a single content summary as HTML."""
+        # Determine article class
+        if summary.is_trending:
+            article_class = "article article-trending"
+        elif is_recent:
+            article_class = "article article-recent"
+        else:
+            article_class = "article article-stale"
+        
+        # Format the summary text - convert markdown bold to HTML and escape
+        summary_text = summary.summary
+        summary_text = summary_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        
+        # Convert **text** to <strong>text</strong>
+        summary_text = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', summary_text)
+        
+        # Add line breaks for multi-meeting summaries
+        summary_text = summary_text.replace('\n\n', '<br><br>')
+        
+        # Trending badge
+        trending_badge = ""
+        if summary.is_trending:
+            trending_badge = '<span class="trending-badge">🔥 ACTIVE</span>'
+        
+        return f'''
+        <div class="{article_class}">
+            <a href="{summary.url}"><strong>{summary.source_name}</strong></a>{trending_badge}
+            <div class="source">{summary.work_group} • {summary.source_type.value.title()}</div>
+            <p style="margin: 10px 0 0 0;">{summary_text}</p>
+        </div>
+'''
