@@ -147,8 +147,10 @@ class ConfluenceScraper:
             
             prompt = f"""Summarize this HL7 FHIR meeting notes in 2-3 concise sentences for a daily digest email. Focus on:
 - Key decisions made (especially JIRA tickets marked "ready for vote")
-- Important announcements
+- Important announcements  
 - Major discussion topics
+
+IMPORTANT: Start your summary with [IGs discussed] in brackets, listing which Implementation Guides were covered (e.g., [PAS, DTR] or [CRD, PAS, DTR] or [All IGs]). Then provide the summary.
 
 Meeting: {meeting_title}
 
