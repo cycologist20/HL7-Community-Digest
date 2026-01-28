@@ -27,8 +27,8 @@ class ZulipSource(BaseModel):
     
     name: str
     work_group: str
-    channel_id: int
-    url: str
+    stream_name: str
+    stream_id: int
     description: Optional[str] = None
 
 

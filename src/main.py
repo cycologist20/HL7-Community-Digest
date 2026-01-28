@@ -57,8 +57,11 @@ class DigestOrchestrator:
         
         # Scrape Zulip if enabled
         if self.config.processing.enable_zulip:
-            logger.info("Zulip scraping not yet implemented (Phase 2)")
-            # TODO: Implement Zulip scraping in Phase 2
+            logger.info("Scraping Zulip sources...")
+            from .scrapers import ZulipScraper
+            zulip_scraper = ZulipScraper()
+            result["zulip"] = zulip_scraper.scrape_all(self.config.sources.zulip)
+            logger.info(f"Scraped {len(result['zulip'])} Zulip channels with activity")
         else:
             logger.info("Zulip scraping disabled")
         

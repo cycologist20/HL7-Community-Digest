@@ -63,11 +63,15 @@ class ZulipThreadContent(ScrapedContent):
     """Content from a Zulip thread/topic."""
     
     source_type: SourceType = SourceType.ZULIP
-    channel_id: int
+    stream_name: str
+    stream_id: int
     topic: str
+    title: str = ""
     messages: list[ZulipMessage] = Field(default_factory=list)
     participant_count: int = 0
     message_count: int = 0
+    content: str = ""  # AI-generated summary content
+    recent_message_count: int = 0  # Messages in recent window (24h)
     is_trending: bool = False
 
 

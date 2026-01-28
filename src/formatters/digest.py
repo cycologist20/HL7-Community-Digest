@@ -249,21 +249,25 @@ class DigestFormatter:
         content: ZulipThreadContent
     ) -> ContentSummary:
         """Create a summary from Zulip thread content."""
+        # Build summary with activity metrics
         summary_parts = []
         
-        if content.message_count > 0:
+        # Add freshness indicator
+        if content.scrape_timestamp:
+            freshness = self._get_freshness_label(content.scrape_timestamp)
+            if freshness:
+                summary_parts.append(freshness)
+        
+        # Add the AI-generated content summary if available
+        if content.content:
+            summary_parts.append(content.content)
+        elif content.message_count > 0:
             summary_parts.append(
                 f"Active discussion ({content.message_count} messages, "
                 f"{content.participant_count} participants) about {content.topic}."
             )
         else:
-            summary_parts.append("No significant activity in last 24 hours.")
-        
-        if content.messages:
-            first_msg = content.messages[0].content[:150]
-            if len(content.messages[0].content) > 150:
-                first_msg += "..."
-            summary_parts.append(f'"{first_msg}"')
+            summary_parts.append("No significant activity in the lookback period.")
         
         summary = " ".join(summary_parts)
         
@@ -275,7 +279,7 @@ class DigestFormatter:
             summary=summary,
             is_trending=content.is_trending,
             has_updates=content.message_count > 0,
-            last_activity=content.messages[-1].timestamp if content.messages else None,
+            last_activity=content.scrape_timestamp,
             participant_count=content.participant_count,
         )
     
