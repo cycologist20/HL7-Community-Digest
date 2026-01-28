@@ -249,27 +249,22 @@ class DigestFormatter:
         content: ZulipThreadContent
     ) -> ContentSummary:
         """Create a summary from Zulip thread content."""
-        # Build summary with activity metrics
+        # The content field contains the AI-generated topic summaries
+        # Format: **Topic** (N new): Summary\n\n**Topic2** (N new): Summary2
+        
         summary_parts = []
         
-        # Add freshness indicator
-        if content.scrape_timestamp:
-            freshness = self._get_freshness_label(content.scrape_timestamp)
-            if freshness:
-                summary_parts.append(freshness)
+        # Add channel stats header
+        stats = f"📌 **{content.source_name}** ({content.message_count} messages, {content.participant_count} participants)"
+        summary_parts.append(stats)
         
-        # Add the AI-generated content summary if available
+        # Add the AI-generated content summaries
         if content.content:
             summary_parts.append(content.content)
-        elif content.message_count > 0:
-            summary_parts.append(
-                f"Active discussion ({content.message_count} messages, "
-                f"{content.participant_count} participants) about {content.topic}."
-            )
         else:
             summary_parts.append("No significant activity in the lookback period.")
         
-        summary = " ".join(summary_parts)
+        summary = "\n\n".join(summary_parts)
         
         return ContentSummary(
             source_type=SourceType.ZULIP,
@@ -603,25 +598,37 @@ class DigestFormatter:
         else:
             article_class = "article article-stale"
         
-        # Format the summary text - convert markdown bold to HTML and escape
+        # Format the summary text - convert markdown bold to HTML
         summary_text = summary.summary
         summary_text = summary_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         
         # Convert **text** to <strong>text</strong>
         summary_text = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', summary_text)
         
-        # Add line breaks for multi-meeting summaries
-        summary_text = summary_text.replace('\n\n', '<br><br>')
+        # Convert newlines to HTML breaks for Zulip multi-topic content
+        summary_text = summary_text.replace('\n\n', '</p><p style="margin: 10px 0;">')
+        summary_text = summary_text.replace('\n', '<br>')
         
         # Trending badge
         trending_badge = ""
         if summary.is_trending:
             trending_badge = '<span class="trending-badge">🔥 ACTIVE</span>'
         
-        return f'''
+        # Different format for Zulip vs Confluence
+        if summary.source_type == SourceType.ZULIP:
+            return f'''
+        <div class="{article_class}">
+            <div class="source">{summary.work_group} • Zulip</div>
+            <p style="margin: 10px 0;">{summary_text}</p>
+            <p style="margin: 5px 0 0 0;"><a href="{summary.url}">→ View channel</a>{trending_badge}</p>
+        </div>
+'''
+        else:
+            return f'''
         <div class="{article_class}">
             <a href="{summary.url}"><strong>{summary.source_name}</strong></a>{trending_badge}
             <div class="source">{summary.work_group} • {summary.source_type.value.title()}</div>
             <p style="margin: 10px 0 0 0;">{summary_text}</p>
         </div>
 '''
+

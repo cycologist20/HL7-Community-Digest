@@ -213,7 +213,7 @@ Messages ({len(messages)} total):
 
 {conversation_text}
 
-Provide a brief summary (2-3 sentences, max 100 words). Start directly with the content."""
+Provide a brief summary (2-3 sentences, max 100 words). Start directly with the substance - do NOT repeat the topic name at the beginning of your summary."""
 
             response = client.messages.create(
                 model="claude-sonnet-4-20250514",
