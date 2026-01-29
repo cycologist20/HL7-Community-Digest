@@ -511,6 +511,37 @@ class DigestFormatter:
             font-weight: bold;
             margin-left: 8px;
         }
+        details {
+            margin: 8px 0;
+            padding: 8px 12px;
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+        }
+        details[open] {
+            background: #f8fafc;
+        }
+        summary {
+            cursor: pointer;
+            font-weight: 500;
+            color: #2d3748;
+            padding: 4px 0;
+        }
+        summary:hover {
+            color: #3182ce;
+        }
+        .topic-content {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid #e2e8f0;
+            font-size: 0.95em;
+            line-height: 1.5;
+        }
+        .channel-header {
+            font-weight: 600;
+            color: #2c5282;
+            margin-bottom: 8px;
+        }
     </style>
 </head>
 <body>
@@ -598,17 +629,6 @@ class DigestFormatter:
         else:
             article_class = "article article-stale"
         
-        # Format the summary text - convert markdown bold to HTML
-        summary_text = summary.summary
-        summary_text = summary_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        
-        # Convert **text** to <strong>text</strong>
-        summary_text = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', summary_text)
-        
-        # Convert newlines to HTML breaks for Zulip multi-topic content
-        summary_text = summary_text.replace('\n\n', '</p><p style="margin: 10px 0;">')
-        summary_text = summary_text.replace('\n', '<br>')
-        
         # Trending badge
         trending_badge = ""
         if summary.is_trending:
@@ -616,19 +636,88 @@ class DigestFormatter:
         
         # Different format for Zulip vs Confluence
         if summary.source_type == SourceType.ZULIP:
-            return f'''
-        <div class="{article_class}">
-            <div class="source">{summary.work_group} • Zulip</div>
-            <p style="margin: 10px 0;">{summary_text}</p>
-            <p style="margin: 5px 0 0 0;"><a href="{summary.url}">→ View channel</a>{trending_badge}</p>
-        </div>
-'''
+            return self._format_zulip_summary_html(summary, article_class, trending_badge)
         else:
-            return f'''
+            return self._format_confluence_summary_html(summary, article_class, trending_badge)
+    
+    def _format_confluence_summary_html(self, summary: ContentSummary, article_class: str, trending_badge: str) -> str:
+        """Format Confluence content as HTML."""
+        summary_text = summary.summary
+        summary_text = summary_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        summary_text = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', summary_text)
+        summary_text = summary_text.replace('\n\n', '</p><p style="margin: 10px 0;">')
+        summary_text = summary_text.replace('\n', '<br>')
+        
+        return f'''
         <div class="{article_class}">
             <a href="{summary.url}"><strong>{summary.source_name}</strong></a>{trending_badge}
             <div class="source">{summary.work_group} • {summary.source_type.value.title()}</div>
             <p style="margin: 10px 0 0 0;">{summary_text}</p>
         </div>
 '''
+    
+    def _format_zulip_summary_html(self, summary: ContentSummary, article_class: str, trending_badge: str) -> str:
+        """Format Zulip content with collapsible topics."""
+        # Parse the summary to extract channel header and individual topics
+        content = summary.summary
+        
+        # Split by the channel header pattern: 📌 **Channel Name** (N messages, N participants)
+        # The content field contains: header + topics separated by \n\n
+        lines = content.split('\n\n')
+        
+        html_parts = [f'''
+        <div class="{article_class}">
+            <div class="source">{summary.work_group} • Zulip</div>
+''']
+        
+        # First line should be the channel header
+        if lines:
+            header = lines[0]
+            header = header.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            header = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', header)
+            html_parts.append(f'            <p class="channel-header">{header}</p>\n')
+        
+        # Remaining lines are topics - make each collapsible
+        topics = lines[1:] if len(lines) > 1 else []
+        
+        for topic in topics:
+            if not topic.strip():
+                continue
+            
+            # Extract topic name from the beginning (pattern: **Topic Name** (N new):)
+            topic_match = re.match(r'\*\*([^*]+)\*\*\s*\((\d+)\s+new(?:,\s*([^\)]+))?\):', topic)
+            if topic_match:
+                topic_name = topic_match.group(1)
+                msg_count = topic_match.group(2)
+                relative_time = topic_match.group(3)
+                # Get the rest as the detail content
+                detail_content = topic[topic_match.end():].strip()
+                
+                # Escape and format the detail content
+                detail_content = detail_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                detail_content = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', detail_content)
+                detail_content = detail_content.replace('\n', '<br>')
+                
+                # Escape topic name
+                topic_name_safe = topic_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                time_suffix = f" ({relative_time})" if relative_time else ""
+                
+                html_parts.append(f'''
+            <details>
+                <summary>💬 {topic_name_safe}{time_suffix} <span style="color: #718096; font-weight: normal;">({msg_count} messages)</span></summary>
+                <div class="topic-content">{detail_content}</div>
+            </details>
+''')
+            else:
+                # Fallback: just show as regular text if pattern doesn't match
+                fallback_text = topic.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                fallback_text = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', fallback_text)
+                html_parts.append(f'            <p style="margin: 8px 0;">{fallback_text}</p>\n')
+        
+        html_parts.append(f'''
+            <p style="margin: 10px 0 0 0;"><a href="{summary.url}">→ View channel</a>{trending_badge}</p>
+        </div>
+''')
+        
+        return "".join(html_parts)
 

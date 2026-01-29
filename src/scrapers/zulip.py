@@ -296,6 +296,18 @@ Provide a brief summary (2-3 sentences, max 100 words). Start directly with the 
                 if m.get("timestamp", 0) >= recent_since.timestamp()
             )
             recent_messages += recent_count
+
+            most_recent_ts = max((m.get("timestamp", 0) for m in topic_messages), default=0)
+            time_ago = ""
+            if most_recent_ts:
+                delta = now - datetime.fromtimestamp(most_recent_ts, tz=timezone.utc)
+                seconds = delta.total_seconds()
+                if seconds < 3600:
+                    time_ago = f"{int(seconds // 60)}m ago"
+                elif seconds < 86400:
+                    time_ago = f"{int(seconds // 3600)}h ago"
+                else:
+                    time_ago = f"{int(delta.days)}d ago"
             
             # Get participants
             for msg in topic_messages:
@@ -310,6 +322,7 @@ Provide a brief summary (2-3 sentences, max 100 words). Start directly with the 
                 "summary": summary,
                 "message_count": len(topic_messages),
                 "recent_count": recent_count,
+                "time_ago": time_ago,
                 "url": thread_url,
             })
         
@@ -319,8 +332,9 @@ Provide a brief summary (2-3 sentences, max 100 words). Start directly with the 
         # Build combined content
         content_parts = []
         for ts in topic_summaries[:5]:  # Top 5 topics
+            time_suffix = f", {ts['time_ago']}" if ts.get("time_ago") else ""
             content_parts.append(
-                f"**{ts['topic']}** ({ts['recent_count']} new): {ts['summary']}"
+                f"**{ts['topic']}** ({ts['recent_count']} new{time_suffix}): {ts['summary']}"
             )
         
         combined_content = "\n\n".join(content_parts)
